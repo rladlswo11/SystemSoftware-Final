@@ -1,0 +1,112 @@
+@startuml
+title System Software Assignment - Process/Data Architecture
+
+skinparam componentStyle rectangle
+
+package "Shell & Scripts" {
+  component "run.sh" <<script>> as RunScript
+}
+
+package "Orchestrator" {
+  component "trainer\n(bin/trainer)" <<process>> as Trainer
+}
+
+package "Pipeline Stages" {
+  component "preprocess\n(bin/preprocess)" <<process>> as Preprocess
+  component "forward_layer\n(bin/forward_layer)" <<process>> as Forward
+  component "backward_layer\n(bin/backward_layer)" <<process>> as Backward
+  component "logger\n(bin/logger)" <<process>> as Logger
+}
+
+package "Libraries" {
+  component "common\n(common.hpp/cpp)" <<library>> as Common
+  component "math_layer\n(math_layer.hpp/cpp)" <<library>> as MathLayer
+}
+
+package "Data & Artifacts" {
+  artifact "data/train.csv" as TrainCSV
+  artifact "data/test.csv"  as TestCSV
+  artifact "logs/*.log"     as LogFiles
+  artifact "logs/*.err"     as ErrFiles
+  artifact "logs/model_params.txt" as ModelFile
+}
+
+' --- Relationships: who calls whom ---
+
+RunScript -down-> Trainer : exec\nBACKWARD_MODE=<phase>\nMODEL_FILE=<path>\nargv[1]=<csv>
+
+Trainer ..> Preprocess : fork + execvp\nstdin: CSV or /dev/null\nstdout: pipe
+Trainer ..> Forward    : fork + execvp\nstdin: pipe\nstdout: pipe
+Trainer ..> Backward   : fork + execvp\nstdin: pipe\nstdout: pipe
+Trainer ..> Logger     : fork + execvp\nstdin: pipe\nstdout: parent's stdout
+
+' --- Data / control flow ---
+
+RunScript --> TrainCSV : uses
+RunScript --> TestCSV  : uses
+
+Preprocess --> TrainCSV : reads\nCSV lines
+Preprocess --> TestCSV  : reads\nCSV lines
+
+Preprocess --> Common   : uses\nparse_csv_line()\nsample_to_line()
+Preprocess --> MathLayer: uses\nnormalize_sample()
+
+Forward --> Common      : uses\nparse_sample_line()\nsample_to_line()
+Forward --> MathLayer   : uses\naugment_features()
+
+Backward --> Common     : uses\nparse_sample_line()
+Backward --> MathLayer  : uses\ncompute_forward()\ncompute_backward_and_update()\nload_parameters()\nsave_parameters()
+
+Logger --> LogFiles : stdout\ncaptured via tee
+Trainer --> ErrFiles : stderr of trainer\n+ children (inherited)
+
+Backward --> ModelFile : load/save\n(model parameters)
+
+' --- Data format notes ---
+
+note right of Common
+  Shared data formats:
+  - CSV line:
+      id, f0, f1, f2, f3, y
+  - Pipeline line (between stages):
+      id f0 f1 f2 f3 y
+  - Backward -> logger line:
+      id loss y_hat
+  - Logger stdout:
+      SAMPLE id LOSS loss YHAT y_hat
+      SUMMARY samples avg_loss avg_yhat
+end note
+
+note right of MathLayer
+  Encapsulates all ML math:
+  - normalization
+  - feature augmentation
+  - 2-layer NN forward
+  - backprop + SGD update
+  - parameter load/save
+  (kept single-threaded)
+end note
+
+note right of Trainer
+  Creates three pipes:
+    pre -> fwd
+    fwd -> bwd
+    bwd -> log
+  Forks 4 children and
+  wires stdin/stdout with dup2.
+  Waits for all children
+  and logs exit status.
+end note
+
+note right of RunScript
+  For each phase ("test" / "train"):
+    - sets BACKWARD_MODE
+    - runs bin/trainer <csv>
+    - trainer stdout | tee log_file
+      | while SAMPLE... -> progress_bar
+    - parses SUMMARY line
+      from log_file and prints
+      a clean phase summary.
+end note
+
+@enduml

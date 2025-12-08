@@ -1,0 +1,88 @@
+@startuml
+title One Phase (train/test) - Process & Data Flow
+
+actor User
+
+participant "run.sh" as Run
+participant "trainer\n(bin/trainer)" as Trainer
+participant "preprocess\n(bin/preprocess)" as Pre
+participant "forward_layer\n(bin/forward_layer)" as Fwd
+participant "backward_layer\n(bin/backward_layer)" as Bwd
+participant "logger\n(bin/logger)" as Log
+database "CSV\n(train.csv / test.csv)" as CSV
+database "log_file\n(logs/<phase>.log)" as LogFile
+database "err_file\n(logs/<phase>.err)" as ErrFile
+database "MODEL_FILE\nlogs/model_params.txt" as ModelFile
+
+' User starts script
+User -> Run : ./run.sh
+
+' run.sh: run_phase(phase, csv, log_file, err_file)
+Run -> Run : run_phase(phase, csv, log_file, err_file)
+
+' run_phase sets env and execs trainer
+Run -> Trainer : exec bin/trainer <csv>\nBACKWARD_MODE=phase\nMODEL_FILE=...
+
+' Trainer forks 4 children and wires pipes
+activate Trainer
+Trainer -> Pre  ++ : fork + execvp("bin/preprocess", csv)
+Trainer -> Fwd  ++ : fork + execvp("bin/forward_layer")
+Trainer -> Bwd  ++ : fork + execvp("bin/backward_layer")
+Trainer -> Log  ++ : fork + execvp("bin/logger")
+
+' Backward loads / saves model depending on phase
+Bwd -> ModelFile : [phase=test]\nload_parameters()\n(if file exists)
+Bwd <-- ModelFile
+
+' --- Data flow through pipeline ---
+
+Pre -> CSV : open & read CSV lines
+loop for each non-empty line
+  Pre -> Pre : parse_csv_line()\nnormalize_sample()
+  Pre -> Fwd : "id f0 f1 f2 f3 y" (whitespace)
+
+  Fwd -> Fwd : parse_sample_line()\naugment_features()
+  Fwd -> Bwd : "id f0' f1' f2' f3' y"
+
+  Bwd -> Bwd : parse_sample_line()\ncompute_forward()
+  alt phase == "train"
+    Bwd -> Bwd : compute_backward_and_update()\n(update weights in memory)
+  else phase == "test"
+    Bwd -> Bwd : compute loss (no update)
+  end
+  Bwd -> Log : "id loss y_hat"
+end
+
+' Logger aggregates stats and prints per-sample + summary
+loop for each line
+  Log -> Log : parse "id loss y_hat"\nupdate count/loss/yhat sums
+  Log -> Run : stdout: "SAMPLE id LOSS loss YHAT y_hat"
+  Run -> LogFile : tee writes SAMPLE line to log_file
+  Run -> Run : if line starts with SAMPLE\n  -> progress_bar(...)
+end
+
+' At end of stream, logger prints summary
+Log -> Run : stdout: "SUMMARY samples avg_loss avg_yhat"
+Run -> LogFile : tee writes SUMMARY line to log_file
+
+deactivate Pre
+deactivate Fwd
+deactivate Bwd
+deactivate Log
+
+' Backward saves parameters after training
+alt phase == "train"
+  Bwd -> ModelFile : save_parameters()
+end
+
+' Trainer waits for children and logs to err_file
+Trainer -> ErrFile : stderr: "trainer: child <pid> exited..."
+
+deactivate Trainer
+
+' run_phase parses SUMMARY from log_file
+Run -> LogFile : grep '^SUMMARY ' | tail -n 1
+Run -> Run : parse samples, avg_loss, avg_yhat
+Run -> User : "[run] Phase '<phase>' summary: samples=... avg_loss=... avg_yhat=..."
+
+@enduml
