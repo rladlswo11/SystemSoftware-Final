@@ -17,23 +17,16 @@ namespace
 
     void sigchld_handler(int)
     {
-        // TODO: mark that at least one child process has exited.
-        // Hint: set the global flag g_child_exited to a non-zero value.
-        //
-        // This flag can be used in the main loop to notice that a SIGCHLD
-        // was delivered and then call wait()/waitpid() to reap children.
+        g_child_exited = 1;
     }
 
     void set_cloexec(int fd)
     {
-        // TODO: mark this file descriptor as close-on-exec using fcntl().
-        //
-        // 1. Use fcntl(fd, F_GETFD) to get current flags.
-        // 2. If the call succeeds, OR the result with FD_CLOEXEC.
-        // 3. Use fcntl(fd, F_SETFD, new_flags) to update.
-        //
-        // This prevents child processes (after exec) from inheriting
-        // these pipe descriptors unintentionally.
+        int flags = fcntl(fd, F_GETFD);
+        if (flags >= 0) {
+            flags |= FD_CLOEXEC;
+            fcntl(fd, F_SETFD, flags);
+        }
     }
 
     int spawn_child(const char *prog,
@@ -41,27 +34,34 @@ namespace
                     int stdin_fd,
                     int stdout_fd)
     {
-        // TODO: fork a child process, hook up its stdin/stdout, and exec 'prog'.
-        //
-        // Required behavior:
-        //   - Call fork().
-        //   - On error (pid < 0), print an error with std::perror("fork")
-        //     and return -1.
-        //
-        //   - In the child (pid == 0):
-        //       * If stdin_fd >= 0 and stdin_fd != STDIN_FILENO,
-        //         dup2(stdin_fd, STDIN_FILENO); on error, perror and _exit(1).
-        //       * If stdout_fd >= 0 and stdout_fd != STDOUT_FILENO,
-        //         dup2(stdout_fd, STDOUT_FILENO); on error, perror and _exit(1).
-        //       * Call execvp(prog, argv).
-        //         On error, print with std::perror("execvp") and _exit(1).
-        //
-        //   - In the parent:
-        //       * Simply return the child's PID (the value from fork()).
-        //
-        // This function does NOT close any file descriptors; the caller
-        // (trainer::run) remains responsible for closing unused pipe ends.
-        return -1; // placeholder return to keep the skeleton compilable
+        pid_t pid = fork();
+
+        if (pid < 0) {
+            std::perror("fork");
+            return -1;
+        }
+
+        if (pid == 0) {
+            if (stdin_fd >= 0 && stdin_fd != STDIN_FILENO) {
+                if (dup2(stdin_fd, STDIN_FILENO) < 0) {
+                    std::perror("dup2 stdin");
+                    _exit(1);
+                }
+            }
+
+            if (stdout_fd >= 0 && stdout_fd != STDOUT_FILENO) {
+                if (dup2(stdout_fd, STDOUT_FILENO) < 0) {
+                    std::perror("dup2 stdout");
+                    _exit(1);
+                }
+            }
+
+            execvp(prog, argv);
+            std::perror("execvp");
+            _exit(1);
+        }
+
+        return pid;
     }
 
 
